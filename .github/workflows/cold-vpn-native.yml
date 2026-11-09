@@ -314,6 +314,8 @@ jobs:
         timeout-minutes: 20
         run: |
           set -euo pipefail
+          # LOCAL (kaiser62): warm CoreSimulator; its first `simctl list` can exceed the harness's 120 s limit.
+          for i in 1 2 3; do xcrun simctl list -j > /dev/null && break || sleep 20; done
           python3 -B harness/ci/issues-native/test_multitask_native_binding.py
           python3 -B harness/ci/multitask-launch/test_contract.py
           python3 -B harness/ci/issues-native/multitask_receipt.py run --sources sources --evidence evidence/multitask-launch --output evidence/multitask-launch-tests.json 2>&1 | tee evidence/multitask-launch-driver.log
