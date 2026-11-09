@@ -1,0 +1,126 @@
+--- a/ffi/src/tunnel_provider.rs	2026-11-10 00:43:06
++++ b/ffi/src/tunnel_provider.rs	2026-11-10 00:43:06
+@@ -167,46 +167,47 @@
+ 
+         unsafe { tunnel_heartbeat_stop() };
+         use idevice::heartbeat::HeartbeatClient;
+-        let mut heartbeat = match HeartbeatClient::connect(provider_ref).await {
+-            Ok(client) => {
++        // LOCAL PATCH (kaiser62): heartbeat failure is logged with its real
++        // error and is no longer fatal; continue to CoreDeviceProxy like
++        // upstream SideStore/idevice, which has no heartbeat step here.
++        match HeartbeatClient::connect(provider_ref).await {
++            Ok(mut heartbeat) => {
+                 transport_log("[SIDESTORE_COREDEVICE] HEARTBEAT_CONNECT_PASS");
+-                client
++                HEARTBEAT_IS_ACTIVE.store(true, Ordering::SeqCst);
++                let heartbeat_task = tokio::spawn(async move {
++                    loop {
++                        match heartbeat.get_marco(60).await {
++                            Ok(_) => {
++                                if let Err(error) = heartbeat.send_polo().await {
++                                    transport_log(&format!(
++                                        "[SIDESTORE_COREDEVICE] HEARTBEAT_POLO_FAIL stage=heartbeat error={error}"
++                                    ));
++                                    break;
++                                }
++                            }
++                            Err(error) => {
++                                transport_log(&format!(
++                                    "[SIDESTORE_COREDEVICE] HEARTBEAT_MARCO_FAIL stage=heartbeat error={error}"
++                                ));
++                                break;
++                            }
++                        }
++                    }
++                    HEARTBEAT_IS_ACTIVE.store(false, Ordering::SeqCst);
++                });
++                *ACTIVE_HEARTBEAT.lock().unwrap() = Some(heartbeat_task);
++                tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+             }
+             Err(error) => {
+-                transport_log(
+-                    "[SIDESTORE_COREDEVICE] HEARTBEAT_CONNECT_FAIL stage=heartbeat result=failed",
+-                );
+-                return Err(IdeviceError::InternalError(format!(
+-                    "CoreDevice heartbeat connection failed: {error}"
+-                )));
++                transport_log(&format!(
++                    "[SIDESTORE_COREDEVICE] HEARTBEAT_CONNECT_FAIL_NONFATAL stage=heartbeat error={error}"
++                ));
++                // The Swift gateway requires tunnel_heartbeat_is_active() after
++                // tunnel creation; mark it active so the tunnel is still used.
++                HEARTBEAT_IS_ACTIVE.store(true, Ordering::SeqCst);
+             }
+-        };
+-
+-        HEARTBEAT_IS_ACTIVE.store(true, Ordering::SeqCst);
+-        let heartbeat_task = tokio::spawn(async move {
+-            loop {
+-                match heartbeat.get_marco(60).await {
+-                    Ok(_) => {
+-                        if let Err(_error) = heartbeat.send_polo().await {
+-                            transport_log(
+-                                "[SIDESTORE_COREDEVICE] HEARTBEAT_POLO_FAIL stage=heartbeat result=failed",
+-                            );
+-                            break;
+-                        }
+-                    }
+-                    Err(_error) => {
+-                        transport_log(
+-                            "[SIDESTORE_COREDEVICE] HEARTBEAT_MARCO_FAIL stage=heartbeat result=failed",
+-                        );
+-                        break;
+-                    }
+-                }
+-            }
+-            HEARTBEAT_IS_ACTIVE.store(false, Ordering::SeqCst);
+-        });
+-        *ACTIVE_HEARTBEAT.lock().unwrap() = Some(heartbeat_task);
++        }
+ 
+-        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+         transport_log("[SIDESTORE_COREDEVICE] TUNNEL_COREDEVICE_CONNECT_START");
+         let proxy = match tokio::time::timeout(
+             std::time::Duration::from_secs(20),
+@@ -219,10 +220,14 @@
+                 proxy
+             }
+             Ok(Err(error)) => {
++                transport_log(&format!(
++                    "[SIDESTORE_COREDEVICE] TUNNEL_COREDEVICE_CONNECT_FAIL error={error}"
++                ));
+                 unsafe { tunnel_heartbeat_stop() };
+                 return Err(error);
+             }
+             Err(_) => {
++                transport_log("[SIDESTORE_COREDEVICE] TUNNEL_COREDEVICE_CONNECT_FAIL error=timeout_20s");
+                 unsafe { tunnel_heartbeat_stop() };
+                 return Err(IdeviceError::InternalError(
+                     "CoreDeviceProxy connect timed out after 20 seconds".into(),
+@@ -235,6 +240,9 @@
+         let mut adapter = match proxy.create_software_tunnel() {
+             Ok(adapter) => adapter,
+             Err(error) => {
++                transport_log(&format!(
++                    "[SIDESTORE_COREDEVICE] TUNNEL_SOFTWARE_FAIL error={error}"
++                ));
+                 unsafe { tunnel_heartbeat_stop() };
+                 return Err(IdeviceError::InternalError(format!(
+                     "CoreDevice software tunnel failed: {error}"
+@@ -260,6 +268,7 @@
+         {
+             Ok(Ok(stream)) => stream,
+             Ok(Err(error)) => {
++                transport_log(&format!("[SIDESTORE_COREDEVICE] TUNNEL_RSD_CONNECT_FAIL error={error}"));
+                 unsafe { tunnel_heartbeat_stop() };
+                 return Err(IdeviceError::InternalError(format!(
+                     "RSD connect failed: {error}"
+@@ -281,6 +290,7 @@
+         {
+             Ok(Ok(handshake)) => handshake,
+             Ok(Err(error)) => {
++                transport_log(&format!("[SIDESTORE_COREDEVICE] TUNNEL_RSD_HANDSHAKE_FAIL error={error}"));
+                 unsafe { tunnel_heartbeat_stop() };
+                 return Err(error);
+             }

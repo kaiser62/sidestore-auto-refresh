@@ -8,7 +8,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   compile:
-    if: github.repository == 'NRG-Wardog/sidestore-auto-refresh' && github.event_name == 'workflow_dispatch'
+    if: (github.repository == 'NRG-Wardog/sidestore-auto-refresh' || github.repository == 'kaiser62/sidestore-auto-refresh') && github.event_name == 'workflow_dispatch'
     runs-on: macos-26
     timeout-minutes: 100
     env:
@@ -34,7 +34,7 @@ jobs:
       - name: Checkout workflow and evidence recorder only
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          repository: NRG-Wardog/sidestore-auto-refresh
+          repository: ${{ github.repository }}
           ref: ${{ github.sha }}
           path: harness
           persist-credentials: false
@@ -536,11 +536,17 @@ jobs:
         run: |
           set -euo pipefail
           cd sources/idevice
+          # LOCAL PATCH (kaiser62): compile with the non-fatal heartbeat patch,
+          # then restore the pinned source so later source checks see it unchanged.
+          git apply --verbose ../../harness/ci/local-patches/heartbeat-nonfatal.patch 2>&1 | tee ../../evidence/local-heartbeat-patch.log
+          grep -q 'HEARTBEAT_CONNECT_FAIL_NONFATAL' ffi/src/tunnel_provider.rs
           BINDGEN_EXTRA_CLANG_ARGS="--sysroot=$(xcrun --sdk iphoneos --show-sdk-path)" IPHONEOS_DEPLOYMENT_TARGET=15.0 \
             cargo +1.98.1 build --locked --release --target aarch64-apple-ios --features obfuscate --manifest-path ffi/Cargo.toml \
             2>&1 | tee ../../evidence/transport-build.log
           test -f target/aarch64-apple-ios/release/libidevice_ffi.a
           test -f ffi/idevice.h
+          git checkout -- ffi/src/tunnel_provider.rs
+          git diff --quiet -- ffi/src/tunnel_provider.rs
           cp ffi/idevice.h swift/include/idevice.h
           # This is a fresh checkout; replace only the pre-existing binary output directory.
           rm -rf swift/IDevice.xcframework
